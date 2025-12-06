@@ -1,0 +1,507 @@
+---
+title: "Final Annotated R Output"
+output: html_notebook
+author: "Cole Maher"
+date: ""
+---
+
+# Load packages
+
+```{r}
+pacman::p_load(janitor, VIM, odds.n.ends, blorr, haven, lmtest, broom, tidyverse, 
+               jtools, ggeffects, emmeans, gtsummary, gt, table1, DiagrammeR, mice) 
+
+#/////////////PACKAGE FUNCTIONS USED IN THIS ANALYSIS//////////////////////////////////////
+
+# janitor:        clean_names() - Clean column names
+# VIM:                   md.pattern() - Visualize missing data patterns (used once)
+# odds.n.ends:               odds.n.ends() - Calculate odds ratios, create ROC and probability plots
+# blorr:                         blr_test_hosmer_lemeshow() - Hosmer-Lemeshow goodness-of-fit test
+# haven:                            read_xpt() - Import BRFSS SAS XPT files
+# lmtest:                               lrtest() - Likelihood ratio tests for model comparison
+# broom:                                   tidy(), augment() - Tidy model outputs and create augmented datasets
+# tidyverse:                                dplyr, ggplot2, tidyr, stringr, etc. - All data manipulation and visualization
+# jtools:                                summ() - Enhanced regression summaries with confidence intervals
+# ggeffects:                         ggpredict(), plot() - Create predicted probability plots with confidence intervals
+# emmeans:                         emmeans() - Estimated marginal means for post-hoc comparisons
+# gtsummary:                    tbl_regression(), tbl_uvregression(), tbl_merge() - Create publication-ready tables
+# gt:                       gtsave(), as_gt() - Save tables as HTML files
+# table1:             table1() - Create descriptive Table 1 with counts and proportions
+# DiagrammeR:     grViz() - Create flowchart diagram
+#mice         Missing data plot
+
+# Set theme
+theme_set(theme_minimal())
+```
+
+# Import dataset and select variables of interest upon entry to avoid unnecessary columns
+
+```{r}
+#read 2024 BRFSS data and select potential variables of interest
+df1 <- read_xpt('/Users/colemaher/Desktop/LLCP2024.XPT ') %>%
+  select("EDUCA", "_SEX", "_IMPRACE", "_AGEG5YR", "FLUSHOT7") %>% 
+  # Select these variables
+    clean_names()  # Clean column names
+        
+# Initial data inspection
+summary(df1)
+md.pattern(df1, rotate.names=TRUE) #missingness isn't a problem. I could evaluate it more broadly, 
+#but I am going to leave it be (*complete case analysis*)
+```
+
+## Clean up outcome variable (DV = flushot7)
+
+```{r}
+# Clean flu shot variable (1 = Yes, 0 = No)
+df2 <- df1 %>%
+  filter(flushot7 %in% 1:2) %>%  # Keep only valid responses
+  mutate(
+    flu_shot = case_when(
+      flushot7 == 1 ~ 1L,  # Yes
+      flushot7 == 2 ~ 0L   # No
+    ),
+    .keep = "unused"  # Remove original flushot7 column
+  ) %>%
+  mutate(educa = case_when(educa == 1 ~ 1, #make the first three levels of education (from BRFSS) a single level of non-hs graduation
+                          educa == 2 ~ 1, 
+                          educa == 3 ~ 1,
+                          educa == 4 ~ 2, #make hs grad second level
+                          educa == 5 ~ 3, #make some college third level
+                          educa == 6 ~ 4, #make college grad (or more) fourth
+                          educa > 6 ~ NA)) %>% #otherwise get rid of it
+  mutate(educ = factor(educa,
+                      levels = 1:4, #create a new ed variable with it factored at these levels
+                      labels = c("Some High School or Less", 
+                                 "High School Graduate", 
+                                 "1-3 years of College or Technical School", 
+                                 "College Graduate or more")))
+
+summary(df2) #check missingness
+```
+
+## Rename columns to simplify and drop NA values, compare length of data frames
+
+```{r}
+# Rename variables and remove missing values
+df3 <- df2 %>%
+  rename( #rename variables
+    education = educa,
+    race = imprace,
+    age_group = ageg5yr
+  ) %>%
+  drop_na()  # Remove missing values
+
+
+
+## Factor the age variable categories and remove all missingness in age
+
+# Convert categorical variables to factors with proper labels
+df3 <- df3 %>%
+  mutate(
+    age_group = factor(age_group,
+                      levels = 1:13,
+                      labels = c("18-24", "25-29", "30-34", "35-39", 
+                                "40-44", "45-49", "50-54", "55-59", 
+                                "60-64", "65-69", "70-74", "75-79", "80+")),
+ sex = factor(sex, levels = 1:2, labels = c("Male", "Female")),
+    flu_shot = factor(flu_shot, levels = 0:1, labels = c("No", "Yes")),
+        race = factor(race, levels = 1:6, labels = c("White, Non-Hispanic", "Black, 
+                                                   Non-Hispanic", "Asian, Non-Hispanic", 
+                                               "American Indian/Alaskan Native, Non-Hispanic", 	
+                                            "Hispanic" , "Other race, Non-Hispanic")) ) %>% 
+  #we have missing values = 14 in the age group variable, so these will be removed
+  filter(age_group != 14) 
+
+sum(is.na(df3$age_group)) #should be
+
+summary(df3)
+
+# Verify no missing values and check data structure
+cat("Final sample size:", nrow(df3), "\n") 
+```
+
+# Run first, simplest model
+
+```{r}
+# Model with age group only
+model1 <- glm(flu_shot ~ age_group, data = df3, family = binomial)
+
+# Enhanced model summary
+summ(model1, confint = TRUE, ci.width = 0.95)  # jtools enhanced model summary
+
+# Odds ratios with confidence intervals
+print("Model 1")
+odds.n.ends(model1, rocPlot = TRUE, predProbPlot = TRUE)
+```
+
+## Multicolinearity and Outlier Analysis
+
+```{r}
+# Outlier analysis using Cook's Distance
+model1_augmented <- augment(model1, type.residuals = "deviance")
+
+# Identify influential observations
+influential_obs <- model1_augmented %>%
+  mutate(observation = row_number()) %>%
+  filter(.cooksd > 4/n())  # Cutoff for cooks
+
+cat("Influential observations (Cook's D > 4/n):", nrow(influential_obs), "\n")
+
+# Plot Cook's Distance
+ggplot(model1_augmented, aes(x = seq_along(.cooksd), y = .cooksd)) +
+  geom_point(alpha = 0.6) +
+  geom_hline(yintercept = 4/nrow(model1_augmented), 
+             color = "red", linetype = "dashed") +
+  labs(x = "Observation", y = "Cook's Distance",
+       title = "Cook's Distance Plot") +
+  theme_minimal()
+```
+
+# Create a multivariate model2 (with race and sex) and test it against our univariate model1
+
+```{r}
+# Multivariate model
+model2 <- glm(flu_shot ~ age_group + race + sex, 
+              data = df3, 
+              family = binomial)
+
+# Model summary 
+summ(model2, confint = TRUE, ci.width = 0.95)
+
+# Likelihood ratio test comparing models
+  lrtest_result <- lrtest(model1, model2)
+  print(lrtest_result)
+
+summ(model2, vifs = TRUE)
+blr_test_hosmer_lemeshow(model2)
+
+# Odds ratios with confidence intervals
+odds.n.ends(model2, rocPlot = TRUE, predProbPlot = TRUE)
+```
+
+## Evaluate Potential for Confounding by Race, Sex, and Education
+
+```{r}
+# ////////
+# ASSESSMENT OF CONFOUNDING: Compare Crude vs Adjusted Models
+# //////
+
+# Extract age group ORs from a model (function)
+extract_age_ors <- function(model, model_name) {
+  tidy(model, conf.int = TRUE, exponentiate = TRUE) %>%
+    filter(str_detect(term, "age_group")) %>%
+    mutate(
+      age_group = gsub("age_group", "", term),
+      or = estimate,
+      ci_low = conf.low,
+      ci_high = conf.high,
+      model = model_name
+    ) %>%
+    select(age_group, or, ci_low, ci_high, model)
+}
+
+# Extract ORs from both models
+crude_ors <- extract_age_ors(model1, "Crude (Unadjusted)")
+adj_ors <- extract_age_ors(model2, "Adjusted (Race + Sex)")
+
+# Combine and calculate percentage change
+confounding_assessment <- crude_ors %>%
+  full_join(adj_ors, by = "age_group", suffix = c("_crude", "_adj")) %>%
+  mutate(
+    percent_change = ((or_adj - or_crude) / or_crude) * 100,
+    abs_percent_change = abs(percent_change),
+    meaningful_confounding = abs_percent_change > 10  # 10% rule
+  ) %>%
+  select(age_group, or_crude, or_adj, percent_change, meaningful_confounding)
+
+# Print results
+cat("\nCONFOUNDING ASSESSMENT: Age Group ORs\n")
+cat(rep("=", 60), "\n")
+cat("Age Group | Crude OR | Adjusted OR | % Change | >10% Change?\n")
+cat(rep("-", 60), "\n")
+
+for(i in 1:nrow(confounding_assessment)) {
+  cat(sprintf("%-10s %-10.2f %-13.2f %-10.1f%% %-15s\n",
+              confounding_assessment$age_group[i],
+              confounding_assessment$or_crude[i],
+              confounding_assessment$or_adj[i],
+              confounding_assessment$percent_change[i],
+              ifelse(confounding_assessment$meaningful_confounding[i], "YES", "no")))
+}
+
+# Summary statistics
+cat("\nSUMMARY:\n")
+cat(rep("=", 40), "\n")
+cat(sprintf("Mean absolute percentage change: %.1f%%\n", 
+            mean(abs(confounding_assessment$percent_change), na.rm = TRUE)))
+cat(sprintf("Maximum percentage change: %.1f%%\n", 
+            max(abs(confounding_assessment$percent_change), na.rm = TRUE)))
+cat(sprintf("Number of age groups with >10%% change: %d\n", 
+            sum(confounding_assessment$meaningful_confounding, na.rm = TRUE)))
+```
+
+# Build Models with interaction and without interaction term
+
+```{r}
+# ///////////
+# WITHOUT interaction
+# ///////////
+model_main <- glm(flu_shot ~ age_group + race + sex + educ, 
+                  family = "binomial", data = df3)
+
+# ///////////
+# WITH interaction between age group and education
+# ///////////
+model_interaction <- glm(flu_shot ~ age_group + educ + race + sex + age_group*educ, 
+                         family = "binomial", data = df3)
+
+# Test whether effect modification is present (compare groups with and without interaction term)
+
+lrtest(model_main, model_interaction)
+
+# Print Model Summary for Interaction
+summary(model_interaction)
+```
+
+# Stratify groups by Education Level and observe odds
+
+```{r}
+
+# ///////////
+# Some HS or Less
+HS.Less <- glm(flu_shot ~ age_group + race + sex, 
+               family = "binomial", data = df3 %>% filter(educ == "Some High School or Less"))
+summary(HS.Less)
+odds.n.ends(HS.Less)
+# ///////////
+# High School Graduate
+HS.Grad <- glm(flu_shot ~ age_group + race + sex, 
+               family = "binomial", data = df3 %>% filter(educ == "High School Graduate"))
+summary(HS.Grad)
+odds.n.ends(HS.Grad)
+
+# ///////////
+# Some College
+CL.Some <- glm(flu_shot ~ age_group + race + sex, 
+               family = "binomial", data = df3 %>% filter(educ == "1-3 years of College or Technical School")) 
+summary(CL.Some)
+odds.n.ends(CL.Some)
+
+# ///////////
+# College Graduate
+CL.Grad <- glm(flu_shot ~ age_group + race + sex, 
+               family = "binomial", data = df3 %>% filter(educ == "College Graduate or more"))
+summary(CL.Grad)
+odds.n.ends(CL.Grad)
+```
+
+# Pull estimated marginal means
+
+```{r}
+#Run formal Estimated Marginal Means
+emm_results <- emmeans(model_interaction, 
+                       specs = ~ age_group | educ,  # by age within each education
+                       type = "response")  # returns probabilities
+print(emm_results)
+```
+
+# Create Univariate and Multivariate Tables:
+
+```{r}
+# UNIVARIATE (UNADJUSTED) ANALYSIS Table
+
+univ_table <- df3 %>%
+  dplyr::select(age_group, flu_shot) %>%
+  tbl_uvregression(
+    method = glm,
+    y = flu_shot,
+    method.args = list(family = binomial),
+    exponentiate = TRUE,
+    label = list(age_group = "Age Group")
+  ) %>%
+  modify_header(label = "**Variable**") %>%
+  modify_caption("**Table 1. Unadjusted Odds Ratios for Influenza Vaccination**") %>%
+  bold_labels() %>%
+  add_n() %>%
+  add_nevent()
+
+
+# MULTIVARIATE (ADJUSTED) ANALYSIS - MODEL 2 (Age only, but adjusted for race/sex) Table
+
+adj_table_model2 <- tbl_regression(
+  model2,
+  exponentiate = TRUE,
+  label = list(age_group = "Age Group"),
+  include = c(age_group),  # Only show age_group, but model includes race/sex
+  estimate_fun = function(x) style_number(x, digits = 2),
+  pvalue_fun = function(x) style_pvalue(x, digits = 3)
+) %>%
+  modify_header(label = "**Variable**") %>%
+  modify_caption("**Table 2. Adjusted Odds Ratios for Influenza Vaccination**") %>%
+  bold_labels() %>%
+  add_n() %>%
+  add_nevent()
+```
+
+#Combine the Tables into a single adjusted and unadjusted table
+
+```{r}
+# Create a combined table showing both unadjusted and adjusted ORs
+combined_table <- tbl_merge(
+  tbls = list(univ_table, adj_table_model2),
+  tab_spanner = c("**Unadjusted OR**", "**Adjusted OR**")
+) %>%
+  modify_caption("**Table 2. Comparison of Unadjusted and Adjusted Odds Ratios for Influenza Vaccination**")
+
+print(combined_table)
+```
+
+#Create Stratified Table: 
+
+```{r}
+# Clean names
+clean_stratified_table <- function(model, model_name) {
+  tbl_regression(
+    model,
+    exponentiate = TRUE,
+    label = list(age_group = "Age Group"),
+    include = c(age_group),  # Only show age_group
+    estimate_fun = function(x) style_number(x, digits = 2),
+    pvalue_fun = function(x) style_pvalue(x, digits = 3)
+  ) %>%
+    modify_header(estimate = paste0("**", model_name, "**")) %>%
+    modify_column_hide(columns = c(ci)) %>%
+    modify_column_unhide(columns = c(estimate, p.value))
+}
+
+# Create tables for each stratified model
+strat_tables <- list(
+  clean_stratified_table(HS.Less, "OR"),
+  clean_stratified_table(HS.Grad, "OR"),
+  clean_stratified_table(CL.Some, "OR"),
+  clean_stratified_table(CL.Grad, "OR")
+)
+
+# Merge stratified tables
+stratified_combined <- tbl_merge(
+  tbls = strat_tables,
+  tab_spanner = c("Some HS or Less", "HS Graduate", "Some College", "College Grad+")
+) %>%
+  modify_caption("**Table 3. Adjusted Odds Ratios for Influenza Vaccination, Stratified by Education Level**") %>%
+  modify_header(label = "**Variable**") %>%
+  modify_footnote(estimate = "Odds ratios adjusted for race and sex within each education stratum") %>%
+  bold_labels()
+
+print(stratified_combined)
+
+# ///////////
+# SAVE TABLES
+# ///////////
+
+# Save tables as HTML
+gtsave(as_gt(combined_table), "table2_combined.html")
+gtsave(as_gt(stratified_combined), "table3_stratified.html")
+```
+
+#Figure 1: Flowchart 
+
+```{r}
+#build each node , then assign them names given sample size at each df level
+grViz(diagram = "digraph flowchart{ # gives beginning of flowchart
+      
+      node [fontname = Helvetica, shape = rectangle, fontsize = 15] 
+    
+      node1 [label = '@@1']  # starting number 
+      node2 [label = '@@2']  # number after exclusion 1
+      node3 [label = '@@3']  # number after exclusion 2
+      
+      node1 -> node2 -> node3
+}
+      [1]: 'Initial BRFSS Sample \\n (n = 457,670)'
+      [2]: 'Second Sample after excluding missing or invalid flu shot response \\n (n = 413,304) \\n (-44,366)'
+      [3]: 'Final Sample after missing or invalid values excluded \\n (n = 405,844) \\n (-7,460)'
+      ")
+```
+
+#Building confounding plot
+
+```{r}
+
+confounding_plot <- confounding_assessment %>%
+  filter(age_group != "18-24") %>%
+  ggplot(aes(x = age_group, y = percent_change)) +
+  geom_col(aes(fill = meaningful_confounding), alpha = 0.7, width = 0.6) +
+  geom_hline(yintercept = c(-10, 10), linetype = "dashed", color = "red", alpha = 0.5) +
+  geom_hline(yintercept = 0, color = "black") +
+  labs(
+    title = "Percentage Change in Age Group ORs After Adjustment",
+    subtitle = "Red dashed lines indicate ±10% threshold for meaningful confounding",
+    x = "Age Group",
+    y = "Percentage Change in OR",
+    fill = ">10% Change?"
+  ) +
+  theme_minimal() +
+  theme(
+    axis.text.x = element_text(angle = 45, hjust = 1),
+    legend.position = "bottom"
+  ) +
+  scale_fill_manual(values = c(`NO CONFOUNDING` = "steelblue", `CONFOUNDING` = "firebrick"), 
+                    drop = FALSE  # This forces both levels to appear in legend
+)
+
+print(confounding_plot)
+
+# Save plot
+ggsave("confounding_change_plot.png", confounding_plot, width = 10, height = 6)
+```
+
+Build interaction plot for the effect modification using predicted probabilities with 95% CI
+
+```{r}
+# Create predicted probabilities
+predicted_probs <- ggpredict(model_interaction, 
+                             terms = c("age_group", "educ"),  
+                             # age_group on x-axis, educ as color grouping
+                             type = "fixed")
+p <- plot(predicted_probs) +
+  theme_minimal() +
+  theme(
+    axis.text.x = element_text(angle = 45, hjust = 1, size = 10),
+    axis.text.y = element_text(size = 11),
+    legend.position = "bottom",
+    plot.title = element_text(hjust = 0.5, face = "bold", size = 14)
+  ) +
+  # construct lines and points
+  geom_line(linewidth = 1.0) +    
+  geom_point(size = 2.5) +      
+  geom_ribbon(aes(ymin = conf.low, ymax = conf.high, fill = group), 
+              # 95% CI around each line for each group
+              alpha = 0.2) +
+  labs(
+    title = "Predicted Probability of Flu Vaccination",
+    subtitle = "Showing age effects stratified by education level",
+    x = "Age Group",
+    y = "Predicted Probability",
+    color = "Education Level",
+    fill = "Education Level"
+  )
+
+print(p)
+
+# Save plot
+ggsave("vaccination_plot_large_elements.pdf", p, width = 12, height = 8)
+```
+
+# Table 1
+
+```{r}
+#just build the thing
+label(df3$age_group) <- "Age Group)"
+label(df3$sex) <- "Sex"
+label(df3$race) <- "Race"
+label(df3$educ) <- "Education Level"
+
+table1( ~ age_group + educ + race + sex | flu_shot, overall = "Total", rowlabelhead = "Variable", df3) 
+table1 <- table1( ~ age_group + educ + race + sex | flu_shot, overall = "Total", rowlabelhead = "Variable", df3) 
+gtsave(as_gt(table1), "table1.html")
+```
