@@ -9,7 +9,7 @@ date: ""
 
 ```{r}
 pacman::p_load(janitor, VIM, odds.n.ends, blorr, haven, lmtest, broom, tidyverse, 
-               jtools, ggeffects, emmeans, gtsummary, gt, table1, DiagrammeR, mice) 
+               jtools, ggeffects, emmeans, gtsummary, gt, table1, DiagrammeR, mice, table1) 
 
 #/////////////PACKAGE FUNCTIONS USED IN THIS ANALYSIS//////////////////////////////////////
 
@@ -38,7 +38,7 @@ theme_set(theme_minimal())
 
 ```{r}
 #read 2024 BRFSS data and select potential variables of interest
-df1 <- read_xpt('/Users/colemaher/Desktop/LLCP2024.XPT ') %>%
+df1 <- read_xpt('/Users/colemaher/Downloads/LLCP2024.XPT ') %>%
   select("EDUCA", "_SEX", "_IMPRACE", "_AGEG5YR", "FLUSHOT7") %>% 
   # Select these variables
     clean_names()  # Clean column names
@@ -503,5 +503,4 @@ label(df3$educ) <- "Education Level"
 
 table1( ~ age_group + educ + race + sex | flu_shot, overall = "Total", rowlabelhead = "Variable", df3) 
 table1 <- table1( ~ age_group + educ + race + sex | flu_shot, overall = "Total", rowlabelhead = "Variable", df3) 
-gtsave(as_gt(table1), "table1.html")
 ```
